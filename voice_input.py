@@ -15,17 +15,20 @@ Alt+X = включить / выключить запись
   абзац          — двойной Enter
 
 Улучшения по сравнению с v3:
-  - Уменьшен BLOCK_SIZE (2000) — точнее границы слов
-  - SetWords(True) — фильтрация слов по уверенности модели
-  - Нормализация громкости аудио — стабильнее распознавание
-  - Фильтрация коротких мусорных слов с низкой уверенностью
-  - Буфер обмена сохраняется и восстанавливается после вставки
-  - «Удали всё» — мгновенное удаление вместо посимвольного
+  - Подавление фонового шума (noisereduce)
+  - Фильтр тишины (VAD) — не отправляет паузы в модель
+  - Нормализация громкости аудио
+  - Фильтрация слов по уверенности модели (SetWords)
+  - Автозамена типичных ошибок распознавания
+  - Склейка коротких фраз в единый текст
+  - Буфер обмена сохраняется и восстанавливается
+  - 40 голосовых команд (пунктуация, скобки, спецсимволы)
   - Своя копия модели — не зависит от папки golos
 """
 
 import os, queue, threading, time, json, re, winsound
 import numpy as np
+import noisereduce as nr
 import sounddevice as sd
 import vosk
 import keyboard, pyperclip
@@ -38,7 +41,31 @@ MODEL_PATH  = r"C:\Users\PC\golos2\model"
 SAMPLE_RATE = 16000
 BLOCK_SIZE  = 2000           # было 4000 — меньше = точнее границы слов
 CONFIDENCE_THRESHOLD = 0.45  # порог уверенности (ниже = мусор)
+SILENCE_THRESHOLD = 300      # порог тишины — блоки тише этого не отправляем в модель
 # ──────────────────────────────────────────────────────────
+
+# автозамена типичных ошибок распознавания
+AUTOCORRECT = {
+    "кот": "код",
+    "коты": "коды",
+    "промыт": "промпт",
+    "промыть": "промпт",
+    "пром": "промпт",
+    "контекст а": "контекста",
+    "нейро сеть": "нейросеть",
+    "нейро сети": "нейросети",
+    "чат бот": "чатбот",
+    "веб сайт": "вебсайт",
+    "он лайн": "онлайн",
+    "оф лайн": "офлайн",
+    "может быт": "может быть",
+    "потому шта": "потому что",
+    "тока": "только",
+    "щас": "сейчас",
+    "чё": "что",
+    "те": "тебе",
+    "ваще": "вообще",
+}
 
 PUNCT = {
     # знаки препинания
@@ -113,16 +140,29 @@ ICON_IDLE = make_tray_icon("#555555")          # серый — ожидание
 ICON_REC  = make_tray_icon("#34c759", dot=True) # зелёный + красная точка — запись
 
 
+def is_silence(data: bytes) -> bool:
+    """Проверяет, является ли блок тишиной (VAD — Voice Activity Detection)."""
+    audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+    rms = np.sqrt(np.mean(audio ** 2))
+    return rms < SILENCE_THRESHOLD
+
+
+def reduce_noise(data: bytes) -> bytes:
+    """Подавление фонового шума — убирает вентилятор, клавиатуру и т.д."""
+    audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+    # noisereduce убирает стационарный шум (гул, вентилятор)
+    cleaned = nr.reduce_noise(y=audio, sr=SAMPLE_RATE, stationary=True, prop_decrease=0.6)
+    cleaned = np.clip(cleaned, -32768, 32767)
+    return cleaned.astype(np.int16).tobytes()
+
+
 def normalize_audio(data: bytes) -> bytes:
-    """Нормализация громкости аудио — выравнивает тихую и громкую речь.
-    Не трогает тихие блоки (тишина/паузы), чтобы не усиливать шум."""
+    """Нормализация громкости аудио — выравнивает тихую и громкую речь."""
     audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
     max_val = np.max(np.abs(audio))
-    # если блок слишком тихий (< 500) — это тишина, не трогаем
     if max_val > 500:
         target = 20000.0
         ratio = target / max_val
-        # ограничиваем усиление максимум в 3 раза, чтобы не раздувать шум
         ratio = min(ratio, 3.0)
         if ratio > 1.1 or ratio < 0.9:
             audio = audio * ratio
@@ -135,7 +175,6 @@ def filter_by_confidence(result: dict) -> str:
     Убирает мусорные слова, в которых модель не уверена."""
     words = result.get("result", [])
     if not words:
-        # если нет слов с уверенностью — вернуть как есть
         return result.get("text", "").strip()
 
     filtered = []
@@ -145,11 +184,18 @@ def filter_by_confidence(result: dict) -> str:
         # короткие слова (1-2 буквы) с низкой уверенностью — почти всегда мусор
         if len(word) <= 2 and conf < 0.6:
             continue
-        # обычные слова фильтруем по основному порогу
         if conf >= CONFIDENCE_THRESHOLD:
             filtered.append(word)
 
     return " ".join(filtered)
+
+
+def apply_autocorrect(text: str) -> str:
+    """Автозамена типичных ошибок распознавания."""
+    result = text
+    for wrong, correct in AUTOCORRECT.items():
+        result = re.sub(rf"(?i)\b{re.escape(wrong)}\b", correct, result)
+    return result
 
 
 def type_text(text: str) -> int:
@@ -193,7 +239,10 @@ def process_text(text: str, chars_typed: list) -> bool:
         print("  [удалено слово]")
         return False
 
-    result = t
+    # автозамена ошибок распознавания
+    result = apply_autocorrect(t)
+
+    # голосовые команды пунктуации
     for cmd, sym in PUNCT.items():
         result = re.sub(rf"(?i)\b{re.escape(cmd)}\b", sym, result)
 
@@ -239,8 +288,14 @@ class VoiceInput:
     def _audio_cb(self, indata, frames, t, status):
         if status:
             print(f"  [аудио: {status}]")
-        # нормализуем громкость перед отправкой в модель
-        normalized = normalize_audio(bytes(indata))
+        raw = bytes(indata)
+        # фильтр тишины — не отправляем пустые блоки в модель
+        if is_silence(raw):
+            return
+        # подавление шума — убираем фоновый гул
+        denoised = reduce_noise(raw)
+        # нормализация громкости
+        normalized = normalize_audio(denoised)
         self.q.put(normalized)
 
     def _record_session(self):
@@ -250,6 +305,8 @@ class VoiceInput:
 
         last_partial = ""
         chars_typed = [0]
+        text_buffer = []                # буфер для склейки коротких фраз
+        buffer_timer = time.time()
 
         with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE,
                                dtype="int16", channels=1,
@@ -258,6 +315,12 @@ class VoiceInput:
                 try:
                     data = self.q.get(timeout=0.2)
                 except queue.Empty:
+                    # если в буфере есть текст и прошло больше 0.8 сек — отправляем
+                    if text_buffer and (time.time() - buffer_timer) > 0.8:
+                        merged = " ".join(text_buffer)
+                        text_buffer.clear()
+                        print(f"\r  → {merged}           ")
+                        process_text(merged, chars_typed)
                     continue
 
                 if rec.AcceptWaveform(data):
@@ -265,8 +328,22 @@ class VoiceInput:
                     text = filter_by_confidence(res)
 
                     if text:
-                        print(f"\r  → {text}           ")
-                        process_text(text, chars_typed)
+                        # короткие фрагменты (1-2 слова) копим в буфер
+                        word_count = len(text.split())
+                        if word_count <= 2:
+                            text_buffer.append(text)
+                            buffer_timer = time.time()
+                        else:
+                            # длинная фраза — сначала сбрасываем буфер, потом её
+                            if text_buffer:
+                                text_buffer.append(text)
+                                merged = " ".join(text_buffer)
+                                text_buffer.clear()
+                                print(f"\r  → {merged}           ")
+                                process_text(merged, chars_typed)
+                            else:
+                                print(f"\r  → {text}           ")
+                                process_text(text, chars_typed)
                     last_partial = ""
                 else:
                     partial = json.loads(rec.PartialResult()).get("partial", "")
@@ -274,12 +351,17 @@ class VoiceInput:
                         print(f"\r  … {partial}   ", end="", flush=True)
                         last_partial = partial
 
+            # финальный результат
             res = json.loads(rec.FinalResult())
             text = filter_by_confidence(res)
-
             if text:
-                print(f"\r  → {text}           ")
-                process_text(text, chars_typed)
+                text_buffer.append(text)
+
+            # сбрасываем оставшийся буфер
+            if text_buffer:
+                merged = " ".join(text_buffer)
+                print(f"\r  → {merged}           ")
+                process_text(merged, chars_typed)
 
         print("\n<<< ОСТАНОВЛЕНО\n")
 
