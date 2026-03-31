@@ -38,7 +38,27 @@ MODEL_PATH  = r"C:\Users\PC\golos2\model"
 SAMPLE_RATE = 16000
 BLOCK_SIZE  = 2000           # было 4000 — меньше = точнее границы слов
 CONFIDENCE_THRESHOLD = 0.45  # порог уверенности (ниже = мусор)
+DICTIONARY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dictionary.txt")
 # ──────────────────────────────────────────────────────────
+
+
+def load_dictionary(filepath: str) -> dict:
+    """Загружает словарь автозамены из файла dictionary.txt"""
+    result = {}
+    if not os.path.exists(filepath):
+        return result
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                wrong, correct = line.split("=", 1)
+                result[wrong.strip().lower()] = correct.strip()
+    return result
+
+
+AUTOCORRECT = load_dictionary(DICTIONARY_FILE)
 
 PUNCT = {
     # знаки препинания
@@ -152,6 +172,16 @@ def filter_by_confidence(result: dict) -> str:
     return " ".join(filtered)
 
 
+def apply_autocorrect(text: str) -> str:
+    """Автозамена слов из dictionary.txt"""
+    if not AUTOCORRECT:
+        return text
+    result = text
+    for wrong, correct in AUTOCORRECT.items():
+        result = re.sub(rf"(?i)\b{re.escape(wrong)}\b", lambda m: correct, result)
+    return result
+
+
 def type_text(text: str) -> int:
     """Вставляет текст через буфер обмена, сохраняя его предыдущее содержимое."""
     if not text:
@@ -193,7 +223,10 @@ def process_text(text: str, chars_typed: list) -> bool:
         print("  [удалено слово]")
         return False
 
-    result = t
+    # автозамена из словаря
+    result = apply_autocorrect(t)
+
+    # голосовые команды пунктуации
     for cmd, sym in PUNCT.items():
         result = re.sub(rf"(?i)\b{re.escape(cmd)}\b", lambda m: sym, result)
 
