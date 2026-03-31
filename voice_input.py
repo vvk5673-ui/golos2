@@ -1,5 +1,5 @@
 """
-Golos 2 — Improved voice input
+Golos 2.0 — Improved voice input
 Alt+X = включить / выключить запись
 
 Голосовые команды (говори во время записи):
@@ -222,7 +222,7 @@ class VoiceInput:
         self.tray = pystray.Icon(
             "golos2",
             ICON_IDLE,
-            "Golos 2 — Alt+X",
+            "Golos 2.0 — Alt+X",
             menu=pystray.Menu(
                 pystray.MenuItem("Выход", self._quit)
             )
@@ -290,13 +290,13 @@ class VoiceInput:
                 except: break
             self.recording = True
             self.tray.icon = ICON_REC
-            self.tray.title = "Golos 2 — REC..."
+            self.tray.title = "Golos 2.0 — REC..."
             winsound.Beep(880, 120)   # высокий бип — старт
             threading.Thread(target=self._record_session, daemon=True).start()
         else:
             self.recording = False
             self.tray.icon = ICON_IDLE
-            self.tray.title = "Golos 2 — Alt+X"
+            self.tray.title = "Golos 2.0 — Alt+X"
             winsound.Beep(440, 200)   # низкий бип — стоп
 
     def run(self):

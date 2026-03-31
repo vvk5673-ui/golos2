@@ -1,7 +1,7 @@
 @echo off
-title Golos 2
+title Golos 2.0
 echo.
-echo  Golos 2 v2.0 - Voice Input
+echo  Golos 2.0 - Voice Input
 echo  Hotkey: Alt+X
 echo.
 python "%~dp0voice_input.py"
