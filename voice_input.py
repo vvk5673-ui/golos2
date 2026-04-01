@@ -25,6 +25,7 @@ Alt+X = включить / выключить запись
 """
 
 import os, queue, threading, time, json, re, winsound
+import tkinter as tk
 import numpy as np
 import sounddevice as sd
 import vosk
@@ -33,13 +34,34 @@ from PIL import Image, ImageDraw
 import pystray
 
 # ── настройки ─────────────────────────────────────────────
-HOTKEY      = "alt+x"
+APP_DIR     = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 MODEL_PATH  = r"C:\Users\PC\golos2\model"
 SAMPLE_RATE = 16000
 BLOCK_SIZE  = 2000           # было 4000 — меньше = точнее границы слов
 CONFIDENCE_THRESHOLD = 0.45  # порог уверенности (ниже = мусор)
-DICTIONARY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dictionary.txt")
+DICTIONARY_FILE = os.path.join(APP_DIR, "dictionary.txt")
+DEFAULT_HOTKEY = "alt+x"
 # ──────────────────────────────────────────────────────────
+
+
+def load_config() -> dict:
+    """Загружает настройки из config.json. Если файла нет — создаёт с настройками по умолчанию."""
+    default = {"hotkey": DEFAULT_HOTKEY}
+    if not os.path.exists(CONFIG_FILE):
+        save_config(default)
+        return default
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_config(config: dict):
+    """Сохраняет настройки в config.json."""
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=4)
 
 
 def load_dictionary(filepath: str) -> dict:
@@ -251,23 +273,115 @@ class VoiceInput:
         self.q = queue.Queue()
         self.recording = False
 
+        # загружаем горячую клавишу из конфига
+        self.config = load_config()
+        self.hotkey = self.config.get("hotkey", DEFAULT_HOTKEY)
+
         # иконка в системном трее
         self.tray = pystray.Icon(
             "golos2",
             ICON_IDLE,
-            "Golos 2.0 — Alt+X",
+            f"Golos 2.0 — {self.hotkey.upper()}",
             menu=pystray.Menu(
+                pystray.MenuItem(
+                    lambda item: f"Горячая клавиша: {self.hotkey.upper()}",
+                    self._change_hotkey
+                ),
                 pystray.MenuItem("Выход", self._quit)
             )
         )
         self.tray.run_detached()
 
-        print(f"Готово!  Нажми  {HOTKEY.upper()}  для старта / стопа\n")
+        print(f"Готово!  Нажми  {self.hotkey.upper()}  для старта / стопа\n")
 
     def _quit(self):
         self.recording = False
         self.tray.stop()
         os._exit(0)
+
+    def _change_hotkey(self):
+        """Открывает маленькое окошко для смены горячей клавиши."""
+        threading.Thread(target=self._hotkey_window, daemon=True).start()
+
+    def _hotkey_window(self):
+        """Окно захвата новой горячей клавиши."""
+        win = tk.Tk()
+        win.title("Golos 2.0 — Смена клавиши")
+        win.geometry("350x150")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+
+        # центрируем окно на экране
+        win.update_idletasks()
+        x = (win.winfo_screenwidth() // 2) - 175
+        y = (win.winfo_screenheight() // 2) - 75
+        win.geometry(f"+{x}+{y}")
+
+        label = tk.Label(win, text=f"Сейчас: {self.hotkey.upper()}", font=("Arial", 14))
+        label.pack(pady=(15, 5))
+
+        hint = tk.Label(win, text="Нажмите новую комбинацию клавиш...", font=("Arial", 11), fg="gray")
+        hint.pack(pady=5)
+
+        result_label = tk.Label(win, text="", font=("Arial", 13, "bold"), fg="green")
+        result_label.pack(pady=5)
+
+        def on_key(event):
+            # собираем комбинацию из модификаторов + клавиша
+            parts = []
+            if event.state & 0x20000 or event.keysym in ("Alt_L", "Alt_R"):
+                parts.append("alt")
+            if event.state & 0x4:
+                parts.append("ctrl")
+            if event.state & 0x1:
+                parts.append("shift")
+
+            # не сохраняем если нажат только модификатор
+            key = event.keysym.lower()
+            if key in ("alt_l", "alt_r", "control_l", "control_r", "shift_l", "shift_r"):
+                return
+
+            parts.append(key)
+            new_hotkey = "+".join(parts)
+
+            # сохраняем новую клавишу
+            self._apply_new_hotkey(new_hotkey)
+
+            result_label.config(text=f"Установлено: {new_hotkey.upper()}")
+            hint.config(text="Окно закроется через 1 сек...")
+            win.after(1000, win.destroy)
+
+        win.bind("<Key>", on_key)
+        win.mainloop()
+
+    def _apply_new_hotkey(self, new_hotkey: str):
+        """Применяет новую горячую клавишу: перерегистрирует и сохраняет в конфиг."""
+        # убираем старую горячую клавишу
+        try:
+            keyboard.remove_hotkey(self.hotkey)
+        except Exception:
+            pass
+
+        # ставим новую
+        self.hotkey = new_hotkey
+        keyboard.add_hotkey(self.hotkey, self.toggle, suppress=True)
+
+        # обновляем конфиг
+        self.config["hotkey"] = new_hotkey
+        save_config(self.config)
+
+        # обновляем трей: подсказку и меню
+        self.tray.title = f"Golos 2.0 — {new_hotkey.upper()}"
+        self.tray.menu = pystray.Menu(
+            pystray.MenuItem(
+                f"Горячая клавиша: {new_hotkey.upper()}",
+                self._change_hotkey
+            ),
+            pystray.MenuItem("Выход", self._quit)
+        )
+        self.tray.update_menu()
+
+        print(f"Горячая клавиша изменена на: {new_hotkey.upper()}")
 
     def _audio_cb(self, indata, frames, t, status):
         if status:
@@ -333,7 +447,7 @@ class VoiceInput:
             winsound.Beep(440, 200)   # низкий бип — стоп
 
     def run(self):
-        keyboard.add_hotkey(HOTKEY, self.toggle, suppress=True)
+        keyboard.add_hotkey(self.hotkey, self.toggle, suppress=True)
         keyboard.wait()
 
 
