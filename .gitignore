@@ -1,0 +1,8 @@
+build/
+dist/
+Golos2_release/
+Golos2.zip
+Golos2.spec
+model/
+__pycache__/
+*.pyc

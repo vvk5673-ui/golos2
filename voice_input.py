@@ -25,6 +25,14 @@ Alt+X = включить / выключить запись
 """
 
 import sys, os, queue, threading, time, json, re, winsound
+
+# при запуске из .exe добавляем путь к DLL vosk до его импорта
+if getattr(sys, 'frozen', False):
+    _vosk_dir = os.path.join(os.path.dirname(sys.executable), "_internal", "vosk")
+    os.environ["PATH"] = _vosk_dir + os.pathsep + os.environ.get("PATH", "")
+    if hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(_vosk_dir)
+
 import tkinter as tk
 import numpy as np
 import sounddevice as sd
