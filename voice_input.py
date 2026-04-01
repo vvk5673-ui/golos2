@@ -24,7 +24,7 @@ Alt+X = включить / выключить запись
   - Своя копия модели — не зависит от папки golos
 """
 
-import os, queue, threading, time, json, re, winsound
+import sys, os, queue, threading, time, json, re, winsound
 import tkinter as tk
 import numpy as np
 import sounddevice as sd
@@ -34,9 +34,13 @@ from PIL import Image, ImageDraw
 import pystray
 
 # ── настройки ─────────────────────────────────────────────
-APP_DIR     = os.path.dirname(os.path.abspath(__file__))
+# определяем папку приложения — работает и из Python, и из .exe
+if getattr(sys, 'frozen', False):
+    APP_DIR = os.path.dirname(sys.executable)
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
-MODEL_PATH  = r"C:\Users\PC\golos2\model"
+MODEL_PATH  = os.path.join(APP_DIR, "model")
 SAMPLE_RATE = 16000
 BLOCK_SIZE  = 2000           # было 4000 — меньше = точнее границы слов
 CONFIDENCE_THRESHOLD = 0.45  # порог уверенности (ниже = мусор)
