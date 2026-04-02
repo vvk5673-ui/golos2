@@ -1,30 +1,30 @@
 """
-Golos 2.0 — Improved voice input
+Golos 2.0 — Голосовой ввод текста для Windows
 Alt+X = включить / выключить запись
 
-Голосовые команды (говори во время записи):
-  удали          — удалить последнее слово
-  удали все      — удалить всё набранное
-  точка          — .
-  запятая        — ,
-  вопрос         — ?
-  восклицание    — !
-  новая строка   — Enter
-  двоеточие      — :
-  тире           — —
-  абзац          — двойной Enter
+Два движка распознавания:
+  - Deepgram Nova-3 (облако) — основной, высокое качество, нужен интернет
+  - Vosk (оффлайн) — запасной, работает без интернета
+  Переключение через меню в трее. Автопереключение на Vosk при потере связи.
 
-Улучшения по сравнению с v3:
-  - Уменьшен BLOCK_SIZE (2000) — точнее границы слов
-  - SetWords(True) — фильтрация слов по уверенности модели
-  - Нормализация громкости аудио — стабильнее распознавание
-  - Фильтрация коротких мусорных слов с низкой уверенностью
-  - Буфер обмена сохраняется и восстанавливается после вставки
-  - «Удали всё» — мгновенное удаление вместо посимвольного
-  - Своя копия модели — не зависит от папки golos
+Голосовые команды (говори во время записи):
+  удали / стереть       — удалить последнее слово
+  удали все / стереть все — удалить всё набранное
+  точка  запятая  вопрос  восклицание  двоеточие  тире  многоточие
+  новая строка  абзац  табуляция  пробел
+  открыть скобку  закрыть скобку  кавычки  ёлочки
+  собака  решётка  номер  процент  слэш  доллар  евро  рубль
+
+Файлы настроек:
+  config.json    — горячая клавиша, выбор движка
+  .env           — API-ключ Deepgram
+  dictionary.txt — словарь автозамены
+  keyterms.txt   — слова-подсказки для Deepgram
+  golos2.log     — лог работы программы
 """
 
 import sys, os, queue, threading, time, json, re, winsound, logging
+from logging.handlers import RotatingFileHandler
 
 # при запуске из .exe добавляем путь к DLL vosk до его импорта
 if getattr(sys, 'frozen', False):
@@ -57,7 +57,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        RotatingFileHandler(LOG_FILE, encoding="utf-8", maxBytes=1_000_000, backupCount=2),
         logging.StreamHandler(),
     ],
 )
@@ -109,11 +109,11 @@ def set_autostart(enabled: bool):
         script_path = os.path.join(APP_DIR, "voice_input.py")
         with open(STARTUP_BAT, "w", encoding="ascii") as f:
             f.write(f'@echo off\ncd /d "{APP_DIR}"\npython "{script_path}"\n')
-        print("Автозапуск включён")
+        log.info("Автозапуск включён")
     else:
         if os.path.exists(STARTUP_BAT):
             os.remove(STARTUP_BAT)
-        print("Автозапуск выключен")
+        log.info("Автозапуск выключен")
 
 
 def load_dictionary(filepath: str) -> dict:
@@ -148,6 +148,8 @@ def load_keyterms(filepath: str) -> list:
                 continue
             result.append(line)
     return result
+
+KEYTERMS = load_keyterms(KEYTERMS_FILE)
 
 PUNCT = {
     # знаки препинания
@@ -271,6 +273,73 @@ def apply_autocorrect(text: str) -> str:
     return result
 
 
+# ── конвертация чисел из слов в цифры ──────────────────────
+_NUMBERS = {
+    "ноль": 0, "нуль": 0,
+    "один": 1, "одна": 1, "одно": 1,
+    "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5,
+    "шесть": 6, "семь": 7, "восемь": 8, "девять": 9,
+    "десять": 10, "одиннадцать": 11, "двенадцать": 12,
+    "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15,
+    "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19,
+    "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50,
+    "шестьдесят": 60, "семьдесят": 70, "восемьдесят": 80, "девяносто": 90,
+    "сто": 100, "двести": 200, "триста": 300, "четыреста": 400, "пятьсот": 500,
+    "шестьсот": 600, "семьсот": 700, "восемьсот": 800, "девятьсот": 900,
+    "тысяча": 1000, "тысячи": 1000, "тысяч": 1000,
+    "миллион": 1_000_000, "миллиона": 1_000_000, "миллионов": 1_000_000,
+}
+
+
+def words_to_number(words: list) -> int:
+    """Преобразует список числовых слов в число.
+    Например: ["двести", "пятьдесят", "три"] → 253"""
+    total = 0
+    current = 0
+    for w in words:
+        val = _NUMBERS.get(w.lower(), None)
+        if val is None:
+            break
+        if val >= 1000:
+            # "пять тысяч" = 5 * 1000
+            current = (current if current else 1) * val
+            total += current
+            current = 0
+        else:
+            current += val
+    return total + current
+
+
+def convert_numbers_in_text(text: str) -> str:
+    """Заменяет числа-слова на цифры в тексте.
+    'двести долларов' → '200 долларов'"""
+    words = text.split()
+    result = []
+    i = 0
+    while i < len(words):
+        # проверяем, начинается ли числовая последовательность
+        if words[i].lower().rstrip(".,!?:;") in _NUMBERS:
+            num_words = []
+            j = i
+            while j < len(words) and words[j].lower().rstrip(".,!?:;") in _NUMBERS:
+                # сохраняем пунктуацию в конце последнего слова
+                clean = words[j].lower().rstrip(".,!?:;")
+                trailing = words[j][len(clean):]
+                num_words.append(clean)
+                j += 1
+            number = words_to_number(num_words)
+            if number > 0:
+                result.append(str(number) + trailing)
+                i = j
+            else:
+                result.append(words[i])
+                i += 1
+        else:
+            result.append(words[i])
+            i += 1
+    return " ".join(result)
+
+
 def type_text(text: str) -> int:
     """Вставляет текст через буфер обмена, сохраняя его предыдущее содержимое."""
     if not text:
@@ -310,7 +379,9 @@ def process_text(text: str, counter: CharCounter) -> bool:
 
     if low in DELETE_ALL_CMDS:
         if counter.count > 0:
-            keyboard.press_and_release("shift+home")
+            # выделяем всё набранное и удаляем
+            for _ in range(counter.count):
+                keyboard.press_and_release("shift+left")
             time.sleep(0.05)
             keyboard.press_and_release("backspace")
             counter.reset()
@@ -340,6 +411,9 @@ def process_text(text: str, counter: CharCounter) -> bool:
 
     # автозамена из словаря
     result = apply_autocorrect(t)
+
+    # числа словами → цифрами ("двести пятьдесят" → "250")
+    result = convert_numbers_in_text(result)
 
     # голосовые команды пунктуации
     for cmd, sym in PUNCT.items():
@@ -394,7 +468,11 @@ class VoiceInput:
         self.tray.run_detached()
 
         log.info(f"Движок: {engine_label}")
-        log.info(f"Готово!  Нажми  {self.hotkey.upper()}  для старта / стопа")
+        log.info(f"Готово!  {self.hotkey.upper()} для старта / стопа")
+
+        # автостарт записи при запуске
+        time.sleep(0.5)
+        self.toggle()
 
     def _build_menu(self):
         """Собирает меню трея."""
@@ -423,7 +501,7 @@ class VoiceInput:
             return
         if self.engine == "vosk":
             if not DEEPGRAM_API_KEY:
-                print("Deepgram API-ключ не найден в .env! Добавьте DEEPGRAM_API_KEY=ваш_ключ")
+                log.warning("Deepgram API-ключ не найден в .env! Добавьте DEEPGRAM_API_KEY=ваш_ключ")
                 return
             self.engine = "deepgram"
         else:
@@ -528,15 +606,16 @@ class VoiceInput:
         save_config(self.config)
 
         # обновляем трей: подсказку и меню
-        self.tray.title = f"Golos 2.0 — {new_hotkey.upper()}"
+        engine_label = "Deepgram" if self.engine == "deepgram" else "Vosk"
+        self.tray.title = f"Golos 2.0 [{engine_label}] — {new_hotkey.upper()}"
         self.tray.menu = self._build_menu()
         self.tray.update_menu()
 
-        print(f"Горячая клавиша изменена на: {new_hotkey.upper()}")
+        log.info(f"Горячая клавиша изменена на: {new_hotkey.upper()}")
 
     def _audio_cb(self, indata, frames, t, status):
         if status:
-            print(f"  [аудио: {status}]")
+            log.warning(f"аудио: {status}")
         if self.engine == "deepgram":
             # Deepgram сам нормализует аудио — отправляем как есть
             self.q.put(bytes(indata))
@@ -601,18 +680,18 @@ class VoiceInput:
         log.info(">>> ЗАПИСЬ [Deepgram Nova-3]...  (Alt+X для остановки)")
         counter = CharCounter()
         last_partial = ""
+        session_start = time.time()
 
-        keyterms = load_keyterms(KEYTERMS_FILE)
         keyterms_params = "&".join(
-            f"keyterm={urllib.parse.quote(k)}" for k in keyterms
-        ) if keyterms else ""
+            f"keyterm={urllib.parse.quote(k)}" for k in KEYTERMS
+        ) if KEYTERMS else ""
 
         url = (
             "wss://api.deepgram.com/v1/listen?"
             "model=nova-3&language=ru&encoding=linear16"
             f"&sample_rate={SAMPLE_RATE}&channels=1"
             "&interim_results=true&punctuate=true"
-            "&numerals=true&endpointing=300&utterance_end_ms=1000"
+            "&endpointing=300&utterance_end_ms=1000"
         )
         if keyterms_params:
             url += f"&{keyterms_params}"
@@ -695,7 +774,9 @@ class VoiceInput:
                 ws.close()
             except Exception:
                 pass
-            log.info("<<< ОСТАНОВЛЕНО")
+            duration = time.time() - session_start
+            cost = duration / 60 * 0.0077  # $0.0077/мин
+            log.info(f"<<< ОСТАНОВЛЕНО  (сессия: {duration:.0f} сек, расход: ~${cost:.4f})")
 
     def toggle(self):
         if not self.recording:
