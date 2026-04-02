@@ -471,9 +471,12 @@ class VoiceInput:
     def _audio_cb(self, indata, frames, t, status):
         if status:
             print(f"  [аудио: {status}]")
-        # нормализуем громкость перед отправкой в модель
-        normalized = normalize_audio(bytes(indata))
-        self.q.put(normalized)
+        if self.engine == "deepgram":
+            # Deepgram сам нормализует аудио — отправляем как есть
+            self.q.put(bytes(indata))
+        else:
+            # Vosk нужна нормализация
+            self.q.put(normalize_audio(bytes(indata)))
 
     def _record_session(self):
         """Запускает сессию записи через выбранный движок."""
@@ -584,14 +587,14 @@ class VoiceInput:
             "wss://api.deepgram.com/v1/listen?"
             "model=nova-3&language=ru&encoding=linear16"
             f"&sample_rate={SAMPLE_RATE}&channels=1"
-            "&interim_results=true&punctuate=true&smart_format=true"
-            "&dictation=true&numerals=true&utterance_end_ms=1000"
+            "&interim_results=true&punctuate=true"
+            "&numerals=true&endpointing=300&utterance_end_ms=1000"
             f"&{keyterms_params}"
         )
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
 
         try:
-            ws = ws_client.connect(url, additional_headers=headers)
+            ws = ws_client.connect(url, additional_headers=headers, open_timeout=10)
             print("  Подключение к Deepgram установлено!")
         except Exception as e:
             print(f"  Не удалось подключиться к Deepgram: {e}")
