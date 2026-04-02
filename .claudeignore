@@ -1,0 +1,22 @@
+# Секреты
+.env
+
+# Сборки и релизы (тяжёлые, не нужны для анализа)
+build/
+dist/
+Golos2_release/
+Golos2.zip
+Golos2.spec
+
+# Модель Vosk (~100 МБ, бинарные файлы)
+model/
+
+# Кеш Python
+__pycache__/
+*.pyc
+
+# Логи
+*.log
+
+# Git
+.git/
