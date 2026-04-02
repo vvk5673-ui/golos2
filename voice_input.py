@@ -118,6 +118,21 @@ def load_dictionary(filepath: str) -> dict:
 
 
 AUTOCORRECT = load_dictionary(DICTIONARY_FILE)
+KEYTERMS_FILE = os.path.join(APP_DIR, "keyterms.txt")
+
+
+def load_keyterms(filepath: str) -> list:
+    """Загружает слова-подсказки из keyterms.txt"""
+    result = []
+    if not os.path.exists(filepath):
+        return result
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            result.append(line)
+    return result
 
 PUNCT = {
     # знаки препинания
@@ -263,7 +278,9 @@ def type_text(text: str) -> int:
 
 def process_text(text: str, chars_typed: list) -> bool:
     t = text.strip()
-    low = t.lower()
+    # убираем пунктуацию, которую Deepgram мог добавить к командам
+    # "Точка." → "точка", "Удали." → "удали"
+    low = re.sub(r'[.,!?:;]', '', t).strip().lower()
 
     if low in DELETE_ALL_CMDS:
         if chars_typed[0] > 0:
@@ -292,7 +309,9 @@ def process_text(text: str, chars_typed: list) -> bool:
     result = re.sub(r" ([.,!?:;])", r"\1", result)
     result = re.sub(r"([.,!?:;])([^\s\n])", r"\1 \2", result)
 
-    if result and result[0].islower():
+    # заглавная буква только если текст начинается с маленькой
+    # и это начало ввода (chars_typed == 0)
+    if result and result[0].islower() and chars_typed[0] == 0:
         result = result[0].upper() + result[1:]
 
     if result.strip():
@@ -534,54 +553,11 @@ class VoiceInput:
         chars_typed = [0]
         last_partial = ""
 
-        # слова-подсказки для Deepgram (лучше распознаёт)
-        keyterms = [
-            # имена и люди
-            "Виктор", "Коротков", "Татьяна", "Таня",
-            # проекты Виктора
-            "Голос", "Golos", "MyCash", "МойКэш", "MyLending",
-            "лендинг", "портфолио",
-            # IT-термины
-            "код", "промпт", "промптинг", "нейросеть", "нейросети",
-            "чатбот", "вайбкодинг",
-            "API", "Python", "JavaScript", "HTML", "CSS",
-            "GitHub", "Vercel", "Claude", "Deepgram", "Vosk",
-            "вебсайт", "фронтенд", "бэкенд",
-            "фреймворк", "библиотека", "репозиторий", "коммит",
-            "деплой", "хостинг", "домен", "сервер",
-            "WebSocket", "SDK", "JSON",
-            # курс и обучение
-            "Нейроуниверситет", "CRAFT",
-            # программирование
-            "файл", "папка", "терминал", "консоль",
-            "функция", "переменная", "массив", "объект",
-            "интерфейс", "компонент", "модуль", "пакет",
-            "баг", "фикс", "тест", "релиз", "версия",
-            "база данных", "запрос", "ответ", "токен",
-            "авторизация", "аутентификация", "пароль", "логин",
-            # инструменты
-            "VS Code", "Claude Code", "Obsidian", "Telegram",
-            "Cursor", "PyInstaller",
-            # оборудование и сеть
-            "роутер", "маршрутизатор", "модем",
-            "TP-Link", "Archer", "Wi-Fi", "LTE",
-            "гигабит", "мегабит",
-            "VPN", "прокси", "SOCKS",
-            # умные устройства
-            "Smart Life", "термостат", "камера",
-            # бизнес и финансы
-            "бюджет", "выручка", "расход", "прибыль",
-            "клиент", "проект", "задача", "дедлайн",
-            "бизнес", "предприниматель",
-            # нейро-фото
-            "Krea", "LoRA", "Flux",
-            # география
-            "Павловка", "Саратовская",
-        ]
+        keyterms = load_keyterms(KEYTERMS_FILE)
         import urllib.parse
         keyterms_params = "&".join(
             f"keyterm={urllib.parse.quote(k)}" for k in keyterms
-        )
+        ) if keyterms else ""
 
         url = (
             "wss://api.deepgram.com/v1/listen?"
@@ -589,8 +565,9 @@ class VoiceInput:
             f"&sample_rate={SAMPLE_RATE}&channels=1"
             "&interim_results=true&punctuate=true"
             "&numerals=true&endpointing=300&utterance_end_ms=1000"
-            f"&{keyterms_params}"
         )
+        if keyterms_params:
+            url += f"&{keyterms_params}"
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
 
         try:
@@ -598,7 +575,9 @@ class VoiceInput:
             print("  Подключение к Deepgram установлено!")
         except Exception as e:
             print(f"  Не удалось подключиться к Deepgram: {e}")
-            print("  Проверьте интернет и API-ключ.")
+            print("  Переключаюсь на Vosk...")
+            winsound.Beep(300, 300)  # низкий длинный бип — ошибка
+            self._record_session_vosk()
             return
 
         # поток для отправки аудио — чтобы не было задержек
@@ -651,7 +630,15 @@ class VoiceInput:
                         continue
                     except Exception as e:
                         print(f"  [Deepgram ошибка: {e}]")
-                        break
+                        print("  Переключаюсь на Vosk...")
+                        winsound.Beep(300, 300)
+                        send_active = False
+                        try:
+                            ws.close()
+                        except Exception:
+                            pass
+                        self._record_session_vosk()
+                        return
         except Exception as e:
             print(f"  [Ошибка записи: {e}]")
         finally:
