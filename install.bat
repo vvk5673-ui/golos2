@@ -27,7 +27,7 @@ echo.
 
 :: Устанавливаем зависимости
 echo  [2/4] Устанавливаю библиотеки...
-pip install vosk sounddevice keyboard pyperclip pillow pystray numpy --quiet
+pip install vosk sounddevice keyboard pyperclip pillow pystray numpy python-dotenv websockets --quiet
 if errorlevel 1 (
     echo.
     echo  ОШИБКА при установке библиотек.

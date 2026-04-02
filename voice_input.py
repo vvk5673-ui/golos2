@@ -24,7 +24,7 @@ Alt+X = включить / выключить запись
   - Своя копия модели — не зависит от папки golos
 """
 
-import sys, os, queue, threading, time, json, re, winsound
+import sys, os, queue, threading, time, json, re, winsound, logging
 
 # при запуске из .exe добавляем путь к DLL vosk до его импорта
 if getattr(sys, 'frozen', False):
@@ -40,6 +40,8 @@ import vosk
 import keyboard, pyperclip
 from PIL import Image, ImageDraw
 import pystray
+import urllib.parse
+import websockets.sync.client as ws_client
 from dotenv import load_dotenv
 
 # ── настройки ─────────────────────────────────────────────
@@ -48,6 +50,19 @@ if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# логирование — в файл и в консоль
+LOG_FILE = os.path.join(APP_DIR, "golos2.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger("golos2")
+
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 MODEL_PATH  = os.path.join(APP_DIR, "model")
 SAMPLE_RATE = 16000
@@ -267,7 +282,7 @@ def type_text(text: str) -> int:
         old_clipboard = ""
     pyperclip.copy(text)
     keyboard.press_and_release("ctrl+v")
-    time.sleep(0.08)
+    time.sleep(0.08)  # пауза чтобы Ctrl+V успел вставить текст до восстановления буфера
     # восстанавливаем буфер обмена
     try:
         pyperclip.copy(old_clipboard)
@@ -276,28 +291,52 @@ def type_text(text: str) -> int:
     return len(text)
 
 
-def process_text(text: str, chars_typed: list) -> bool:
+class CharCounter:
+    """Счётчик набранных символов и состояние для сессии записи."""
+    def __init__(self):
+        self.count = 0
+        self.capitalize_next = True  # первая фраза всегда с заглавной
+
+    def reset(self):
+        self.count = 0
+        self.capitalize_next = True
+
+
+def process_text(text: str, counter: CharCounter) -> bool:
     t = text.strip()
     # убираем пунктуацию, которую Deepgram мог добавить к командам
     # "Точка." → "точка", "Удали." → "удали"
     low = re.sub(r'[.,!?:;]', '', t).strip().lower()
 
     if low in DELETE_ALL_CMDS:
-        if chars_typed[0] > 0:
-            # выделяем назад все набранные символы и удаляем одним нажатием
-            keyboard.press_and_release(f"shift+home")
+        if counter.count > 0:
+            keyboard.press_and_release("shift+home")
             time.sleep(0.05)
             keyboard.press_and_release("backspace")
-            chars_typed[0] = 0
+            counter.reset()
             print("  [удалено всё]")
         return False
 
     if low in DELETE_CMDS:
         keyboard.press_and_release("ctrl+backspace")
-        # не пытаемся угадать длину слова — просто уменьшаем на примерную величину
-        chars_typed[0] = max(0, chars_typed[0] - 10)
+        counter.count = max(0, counter.count - 10)
         print("  [удалено слово]")
         return False
+
+    # если вся фраза — одна голосовая команда пунктуации, выполняем сразу
+    # (без обработки, чтобы Deepgram-пунктуация не мешала)
+    if low in PUNCT:
+        sym = PUNCT[low]
+        # убираем пробел перед знаком препинания (., ! ? : ; и т.д.)
+        if sym in (".", ",", "!", "?", ":", ";", "...", ")", "»"):
+            keyboard.press_and_release("backspace")
+            time.sleep(0.03)
+        typed = type_text(sym + " ")
+        counter.count += typed
+        # после новой строки или конца предложения — следующий текст с заглавной
+        if sym in ("\n", "\n\n", ".", "!", "?"):
+            counter.capitalize_next = True
+        return True
 
     # автозамена из словаря
     result = apply_autocorrect(t)
@@ -309,14 +348,14 @@ def process_text(text: str, chars_typed: list) -> bool:
     result = re.sub(r" ([.,!?:;])", r"\1", result)
     result = re.sub(r"([.,!?:;])([^\s\n])", r"\1 \2", result)
 
-    # заглавная буква только если текст начинается с маленькой
-    # и это начало ввода (chars_typed == 0)
-    if result and result[0].islower() and chars_typed[0] == 0:
+    # заглавная буква — в начале ввода, после новой строки, после . ! ?
+    if result and result[0].islower() and counter.capitalize_next:
         result = result[0].upper() + result[1:]
+    counter.capitalize_next = result.rstrip().endswith((".", "!", "?"))
 
     if result.strip():
         typed = type_text(result + " ")
-        chars_typed[0] += typed
+        counter.count += typed
         return True
     return False
 
@@ -332,16 +371,16 @@ class VoiceInput:
         self.engine = self.config.get("engine", "vosk")  # "vosk" или "deepgram"
 
         # загружаем Vosk-модель (нужна всегда как запасной вариант)
-        print("Загрузка модели Vosk...")
+        log.info("Загрузка модели Vosk...")
         vosk.SetLogLevel(-1)
         self.model = vosk.Model(MODEL_PATH)
 
         # проверяем Deepgram API-ключ
         if DEEPGRAM_API_KEY:
-            print(f"Deepgram API-ключ: найден")
+            log.info("Deepgram API-ключ: найден")
         else:
             if self.engine == "deepgram":
-                print("ВНИМАНИЕ: Deepgram API-ключ не найден в .env! Переключаюсь на Vosk.")
+                log.warning("Deepgram API-ключ не найден в .env! Переключаюсь на Vosk.")
                 self.engine = "vosk"
 
         # иконка в системном трее
@@ -354,8 +393,8 @@ class VoiceInput:
         )
         self.tray.run_detached()
 
-        print(f"Движок: {engine_label}")
-        print(f"Готово!  Нажми  {self.hotkey.upper()}  для старта / стопа\n")
+        log.info(f"Движок: {engine_label}")
+        log.info(f"Готово!  Нажми  {self.hotkey.upper()}  для старта / стопа")
 
     def _build_menu(self):
         """Собирает меню трея."""
@@ -379,6 +418,9 @@ class VoiceInput:
 
     def _toggle_engine(self):
         """Переключает движок распознавания между Vosk и Deepgram."""
+        if self.recording:
+            log.warning("Нельзя переключить движок во время записи!")
+            return
         if self.engine == "vosk":
             if not DEEPGRAM_API_KEY:
                 print("Deepgram API-ключ не найден в .env! Добавьте DEEPGRAM_API_KEY=ваш_ключ")
@@ -395,7 +437,7 @@ class VoiceInput:
         self.tray.title = f"Golos 2.0 [{engine_label}] — {self.hotkey.upper()}"
         self.tray.menu = self._build_menu()
         self.tray.update_menu()
-        print(f"Движок переключён на: {engine_label}")
+        log.info(f"Движок переключён на: {engine_label}")
 
     def _toggle_autostart(self):
         """Включает/выключает автозапуск."""
@@ -405,7 +447,12 @@ class VoiceInput:
         self.tray.update_menu()
 
     def _quit(self):
+        log.info("Завершение работы...")
         self.recording = False
+        try:
+            keyboard.unhook_all()
+        except Exception:
+            pass
         self.tray.stop()
         os._exit(0)
 
@@ -506,55 +553,56 @@ class VoiceInput:
 
     def _record_session_vosk(self):
         """Сессия записи через Vosk (оффлайн)."""
-        print(">>> ЗАПИСЬ [Vosk]...  (Alt+X для остановки)")
+        log.info(">>> ЗАПИСЬ [Vosk]...  (Alt+X для остановки)")
         rec = vosk.KaldiRecognizer(self.model, SAMPLE_RATE)
         rec.SetWords(True)
 
         last_partial = ""
-        chars_typed = [0]
+        counter = CharCounter()
 
-        with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE,
-                               dtype="int16", channels=1,
-                               callback=self._audio_cb):
-            while self.recording:
-                try:
-                    data = self.q.get(timeout=0.2)
-                except queue.Empty:
-                    continue
+        try:
+            with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE,
+                                   dtype="int16", channels=1,
+                                   callback=self._audio_cb):
+                while self.recording:
+                    try:
+                        data = self.q.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
 
-                if rec.AcceptWaveform(data):
-                    res = json.loads(rec.Result())
-                    text = filter_by_confidence(res)
+                    if rec.AcceptWaveform(data):
+                        res = json.loads(rec.Result())
+                        text = filter_by_confidence(res)
 
-                    if text:
-                        print(f"\r  → {text}           ")
-                        process_text(text, chars_typed)
-                    last_partial = ""
-                else:
-                    partial = json.loads(rec.PartialResult()).get("partial", "")
-                    if partial and partial != last_partial:
-                        print(f"\r  … {partial}   ", end="", flush=True)
-                        last_partial = partial
+                        if text:
+                            print(f"\r  → {text}           ")
+                            process_text(text, counter)
+                        last_partial = ""
+                    else:
+                        partial = json.loads(rec.PartialResult()).get("partial", "")
+                        if partial and partial != last_partial:
+                            print(f"\r  … {partial}   ", end="", flush=True)
+                            last_partial = partial
 
-            res = json.loads(rec.FinalResult())
-            text = filter_by_confidence(res)
+                res = json.loads(rec.FinalResult())
+                text = filter_by_confidence(res)
 
-            if text:
-                print(f"\r  → {text}           ")
-                process_text(text, chars_typed)
+                if text:
+                    print(f"\r  → {text}           ")
+                    process_text(text, counter)
+        except Exception as e:
+            log.error(f"Ошибка Vosk: {e}")
 
-        print("\n<<< ОСТАНОВЛЕНО\n")
+        log.info("<<< ОСТАНОВЛЕНО")
 
     def _record_session_deepgram(self):
         """Сессия записи через Deepgram (облако, нужен интернет)."""
-        import websockets.sync.client as ws_client
 
-        print(">>> ЗАПИСЬ [Deepgram Nova-3]...  (Alt+X для остановки)")
-        chars_typed = [0]
+        log.info(">>> ЗАПИСЬ [Deepgram Nova-3]...  (Alt+X для остановки)")
+        counter = CharCounter()
         last_partial = ""
 
         keyterms = load_keyterms(KEYTERMS_FILE)
-        import urllib.parse
         keyterms_params = "&".join(
             f"keyterm={urllib.parse.quote(k)}" for k in keyterms
         ) if keyterms else ""
@@ -572,10 +620,10 @@ class VoiceInput:
 
         try:
             ws = ws_client.connect(url, additional_headers=headers, open_timeout=10)
-            print("  Подключение к Deepgram установлено!")
+            log.info("Подключение к Deepgram установлено!")
         except Exception as e:
-            print(f"  Не удалось подключиться к Deepgram: {e}")
-            print("  Переключаюсь на Vosk...")
+            log.error(f"Не удалось подключиться к Deepgram: {e}")
+            log.info("Переключаюсь на Vosk...")
             winsound.Beep(300, 300)  # низкий длинный бип — ошибка
             self._record_session_vosk()
             return
@@ -619,7 +667,7 @@ class VoiceInput:
 
                         if is_final:
                             print(f"\r  → {transcript}           ")
-                            process_text(transcript, chars_typed)
+                            process_text(transcript, counter)
                             last_partial = ""
                         else:
                             if transcript != last_partial:
@@ -629,8 +677,8 @@ class VoiceInput:
                     except TimeoutError:
                         continue
                     except Exception as e:
-                        print(f"  [Deepgram ошибка: {e}]")
-                        print("  Переключаюсь на Vosk...")
+                        log.error(f"Deepgram ошибка: {e}")
+                        log.info("Переключаюсь на Vosk...")
                         winsound.Beep(300, 300)
                         send_active = False
                         try:
@@ -640,14 +688,14 @@ class VoiceInput:
                         self._record_session_vosk()
                         return
         except Exception as e:
-            print(f"  [Ошибка записи: {e}]")
+            log.error(f"Ошибка записи: {e}")
         finally:
             send_active = False
             try:
                 ws.close()
             except Exception:
                 pass
-            print("\n<<< ОСТАНОВЛЕНО\n")
+            log.info("<<< ОСТАНОВЛЕНО")
 
     def toggle(self):
         if not self.recording:
@@ -656,13 +704,15 @@ class VoiceInput:
                 except: break
             self.recording = True
             self.tray.icon = ICON_REC
-            self.tray.title = "Golos 2.0 — REC..."
+            engine_label = "Deepgram" if self.engine == "deepgram" else "Vosk"
+            self.tray.title = f"Golos 2.0 [{engine_label}] — REC..."
             winsound.Beep(880, 120)   # высокий бип — старт
             threading.Thread(target=self._record_session, daemon=True).start()
         else:
             self.recording = False
             self.tray.icon = ICON_IDLE
-            self.tray.title = "Golos 2.0 — Alt+X"
+            engine_label = "Deepgram" if self.engine == "deepgram" else "Vosk"
+            self.tray.title = f"Golos 2.0 [{engine_label}] — {self.hotkey.upper()}"
             winsound.Beep(440, 200)   # низкий бип — стоп
 
     def run(self):
