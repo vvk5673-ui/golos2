@@ -443,6 +443,7 @@ class VoiceInput:
         self.config = load_config()
         self.hotkey = self.config.get("hotkey", DEFAULT_HOTKEY)
         self.engine = self.config.get("engine", "vosk")  # "vosk" или "deepgram"
+        self.deepgram_seconds = self.config.get("deepgram_seconds", 0)  # общее время Deepgram
 
         # загружаем Vosk-модель (нужна всегда как запасной вариант)
         log.info("Загрузка модели Vosk...")
@@ -474,11 +475,25 @@ class VoiceInput:
         time.sleep(0.5)
         self.toggle()
 
+    def _format_credit(self):
+        """Форматирует строку расхода кредита."""
+        cost = self.deepgram_seconds / 60 * 0.0077
+        remaining = 200.0 - cost
+        mins = int(self.deepgram_seconds // 60)
+        secs = int(self.deepgram_seconds % 60)
+        return f"Кредит: ${remaining:.2f} из $200  ({mins}м {secs}с)"
+
     def _build_menu(self):
         """Собирает меню трея."""
         engine_label = "Deepgram" if self.engine == "deepgram" else "Vosk"
         other_engine = "Deepgram" if self.engine == "vosk" else "Vosk"
         return pystray.Menu(
+            pystray.MenuItem(
+                lambda item: self._format_credit(),
+                None,
+                enabled=False
+            ),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 lambda item: f"Движок: {engine_label}  (переключить на {other_engine})",
                 self._toggle_engine
@@ -775,8 +790,16 @@ class VoiceInput:
             except Exception:
                 pass
             duration = time.time() - session_start
+            self.deepgram_seconds += duration
+            # сохраняем общее время в конфиг
+            self.config["deepgram_seconds"] = self.deepgram_seconds
+            save_config(self.config)
+            # обновляем меню трея
+            self.tray.menu = self._build_menu()
+            self.tray.update_menu()
             cost = duration / 60 * 0.0077  # $0.0077/мин
-            log.info(f"<<< ОСТАНОВЛЕНО  (сессия: {duration:.0f} сек, расход: ~${cost:.4f})")
+            total_cost = self.deepgram_seconds / 60 * 0.0077
+            log.info(f"<<< ОСТАНОВЛЕНО  (сессия: {duration:.0f} сек, ~${cost:.4f}  |  всего: ${total_cost:.2f} из $200)")
 
     def toggle(self):
         if not self.recording:
