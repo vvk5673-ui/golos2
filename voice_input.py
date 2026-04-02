@@ -531,12 +531,62 @@ class VoiceInput:
         chars_typed = [0]
         last_partial = ""
 
+        # слова-подсказки для Deepgram (лучше распознаёт)
+        keyterms = [
+            # имена и люди
+            "Виктор", "Коротков", "Татьяна", "Таня",
+            # проекты Виктора
+            "Голос", "Golos", "MyCash", "МойКэш", "MyLending",
+            "лендинг", "портфолио",
+            # IT-термины
+            "код", "промпт", "промптинг", "нейросеть", "нейросети",
+            "чатбот", "вайбкодинг",
+            "API", "Python", "JavaScript", "HTML", "CSS",
+            "GitHub", "Vercel", "Claude", "Deepgram", "Vosk",
+            "вебсайт", "фронтенд", "бэкенд",
+            "фреймворк", "библиотека", "репозиторий", "коммит",
+            "деплой", "хостинг", "домен", "сервер",
+            "WebSocket", "SDK", "JSON",
+            # курс и обучение
+            "Нейроуниверситет", "CRAFT",
+            # программирование
+            "файл", "папка", "терминал", "консоль",
+            "функция", "переменная", "массив", "объект",
+            "интерфейс", "компонент", "модуль", "пакет",
+            "баг", "фикс", "тест", "релиз", "версия",
+            "база данных", "запрос", "ответ", "токен",
+            "авторизация", "аутентификация", "пароль", "логин",
+            # инструменты
+            "VS Code", "Claude Code", "Obsidian", "Telegram",
+            "Cursor", "PyInstaller",
+            # оборудование и сеть
+            "роутер", "маршрутизатор", "модем",
+            "TP-Link", "Archer", "Wi-Fi", "LTE",
+            "гигабит", "мегабит",
+            "VPN", "прокси", "SOCKS",
+            # умные устройства
+            "Smart Life", "термостат", "камера",
+            # бизнес и финансы
+            "бюджет", "выручка", "расход", "прибыль",
+            "клиент", "проект", "задача", "дедлайн",
+            "бизнес", "предприниматель",
+            # нейро-фото
+            "Krea", "LoRA", "Flux",
+            # география
+            "Павловка", "Саратовская",
+        ]
+        import urllib.parse
+        keyterms_params = "&".join(
+            f"keyterm={urllib.parse.quote(k)}" for k in keyterms
+        )
+
         url = (
             "wss://api.deepgram.com/v1/listen?"
             "model=nova-3&language=ru&encoding=linear16"
             f"&sample_rate={SAMPLE_RATE}&channels=1"
             "&interim_results=true&punctuate=true&smart_format=true"
-            "&utterance_end_ms=1000"
+            "&dictation=true&numerals=true&utterance_end_ms=1000"
+            f"&{keyterms_params}"
         )
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
 
