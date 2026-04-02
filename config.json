@@ -1,3 +1,4 @@
 {
-    "hotkey": "alt+x"
+    "hotkey": "alt+x",
+    "engine": "deepgram"
 }

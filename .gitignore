@@ -6,3 +6,4 @@ Golos2.spec
 model/
 __pycache__/
 *.pyc
+.env

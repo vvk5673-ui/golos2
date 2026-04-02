@@ -40,6 +40,7 @@ import vosk
 import keyboard, pyperclip
 from PIL import Image, ImageDraw
 import pystray
+from dotenv import load_dotenv
 
 # ── настройки ─────────────────────────────────────────────
 # определяем папку приложения — работает и из Python, и из .exe
@@ -56,6 +57,10 @@ DICTIONARY_FILE = os.path.join(APP_DIR, "dictionary.txt")
 DEFAULT_HOTKEY = "alt+x"
 STARTUP_DIR = os.path.join(os.environ["APPDATA"], "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 STARTUP_BAT = os.path.join(STARTUP_DIR, "golos2.bat")
+
+# загружаем .env файл с API-ключами
+load_dotenv(os.path.join(APP_DIR, ".env"))
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 # ──────────────────────────────────────────────────────────
 
 
@@ -299,30 +304,49 @@ def process_text(text: str, chars_typed: list) -> bool:
 
 class VoiceInput:
     def __init__(self):
-        print("Загрузка модели...")
-        vosk.SetLogLevel(-1)
-        self.model = vosk.Model(MODEL_PATH)
         self.q = queue.Queue()
         self.recording = False
 
-        # загружаем горячую клавишу из конфига
+        # загружаем горячую клавишу и движок из конфига
         self.config = load_config()
         self.hotkey = self.config.get("hotkey", DEFAULT_HOTKEY)
+        self.engine = self.config.get("engine", "vosk")  # "vosk" или "deepgram"
+
+        # загружаем Vosk-модель (нужна всегда как запасной вариант)
+        print("Загрузка модели Vosk...")
+        vosk.SetLogLevel(-1)
+        self.model = vosk.Model(MODEL_PATH)
+
+        # проверяем Deepgram API-ключ
+        if DEEPGRAM_API_KEY:
+            print(f"Deepgram API-ключ: найден")
+        else:
+            if self.engine == "deepgram":
+                print("ВНИМАНИЕ: Deepgram API-ключ не найден в .env! Переключаюсь на Vosk.")
+                self.engine = "vosk"
 
         # иконка в системном трее
+        engine_label = "Deepgram" if self.engine == "deepgram" else "Vosk"
         self.tray = pystray.Icon(
             "golos2",
             ICON_IDLE,
-            f"Golos 2.0 — {self.hotkey.upper()}",
+            f"Golos 2.0 [{engine_label}] — {self.hotkey.upper()}",
             menu=self._build_menu()
         )
         self.tray.run_detached()
 
+        print(f"Движок: {engine_label}")
         print(f"Готово!  Нажми  {self.hotkey.upper()}  для старта / стопа\n")
 
     def _build_menu(self):
         """Собирает меню трея."""
+        engine_label = "Deepgram" if self.engine == "deepgram" else "Vosk"
+        other_engine = "Deepgram" if self.engine == "vosk" else "Vosk"
         return pystray.Menu(
+            pystray.MenuItem(
+                lambda item: f"Движок: {engine_label}  (переключить на {other_engine})",
+                self._toggle_engine
+            ),
             pystray.MenuItem(
                 lambda item: f"Горячая клавиша: {self.hotkey.upper()}",
                 self._change_hotkey
@@ -333,6 +357,26 @@ class VoiceInput:
             ),
             pystray.MenuItem("Выход", self._quit)
         )
+
+    def _toggle_engine(self):
+        """Переключает движок распознавания между Vosk и Deepgram."""
+        if self.engine == "vosk":
+            if not DEEPGRAM_API_KEY:
+                print("Deepgram API-ключ не найден в .env! Добавьте DEEPGRAM_API_KEY=ваш_ключ")
+                return
+            self.engine = "deepgram"
+        else:
+            self.engine = "vosk"
+
+        # сохраняем выбор
+        self.config["engine"] = self.engine
+        save_config(self.config)
+
+        engine_label = "Deepgram" if self.engine == "deepgram" else "Vosk"
+        self.tray.title = f"Golos 2.0 [{engine_label}] — {self.hotkey.upper()}"
+        self.tray.menu = self._build_menu()
+        self.tray.update_menu()
+        print(f"Движок переключён на: {engine_label}")
 
     def _toggle_autostart(self):
         """Включает/выключает автозапуск."""
@@ -432,9 +476,17 @@ class VoiceInput:
         self.q.put(normalized)
 
     def _record_session(self):
-        print(">>> ЗАПИСЬ...  (Alt+X для остановки)")
+        """Запускает сессию записи через выбранный движок."""
+        if self.engine == "deepgram" and DEEPGRAM_API_KEY:
+            self._record_session_deepgram()
+        else:
+            self._record_session_vosk()
+
+    def _record_session_vosk(self):
+        """Сессия записи через Vosk (оффлайн)."""
+        print(">>> ЗАПИСЬ [Vosk]...  (Alt+X для остановки)")
         rec = vosk.KaldiRecognizer(self.model, SAMPLE_RATE)
-        rec.SetWords(True)              # включаем уверенность по словам
+        rec.SetWords(True)
 
         last_partial = ""
         chars_typed = [0]
@@ -470,6 +522,92 @@ class VoiceInput:
                 process_text(text, chars_typed)
 
         print("\n<<< ОСТАНОВЛЕНО\n")
+
+    def _record_session_deepgram(self):
+        """Сессия записи через Deepgram (облако, нужен интернет)."""
+        import websockets.sync.client as ws_client
+
+        print(">>> ЗАПИСЬ [Deepgram Nova-3]...  (Alt+X для остановки)")
+        chars_typed = [0]
+        last_partial = ""
+
+        url = (
+            "wss://api.deepgram.com/v1/listen?"
+            "model=nova-3&language=ru&encoding=linear16"
+            f"&sample_rate={SAMPLE_RATE}&channels=1"
+            "&interim_results=true&punctuate=true&smart_format=true"
+            "&utterance_end_ms=1000"
+        )
+        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+
+        try:
+            ws = ws_client.connect(url, additional_headers=headers)
+            print("  Подключение к Deepgram установлено!")
+        except Exception as e:
+            print(f"  Не удалось подключиться к Deepgram: {e}")
+            print("  Проверьте интернет и API-ключ.")
+            return
+
+        # поток для отправки аудио — чтобы не было задержек
+        send_active = True
+        def audio_sender():
+            while send_active and self.recording:
+                try:
+                    data = self.q.get(timeout=0.05)
+                    ws.send(data)
+                except queue.Empty:
+                    pass
+                except Exception:
+                    break
+
+        sender_thread = threading.Thread(target=audio_sender, daemon=True)
+
+        try:
+            with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE,
+                                   dtype="int16", channels=1,
+                                   callback=self._audio_cb):
+                sender_thread.start()
+
+                while self.recording:
+                    try:
+                        msg = ws.recv(timeout=0.3)
+                        data = json.loads(msg)
+
+                        if data.get("type") != "Results":
+                            continue
+
+                        ch = data.get("channel", {})
+                        alternatives = ch.get("alternatives", [{}])
+                        transcript = alternatives[0].get("transcript", "").strip()
+
+                        if not transcript:
+                            continue
+
+                        is_final = data.get("is_final", False)
+
+                        if is_final:
+                            print(f"\r  → {transcript}           ")
+                            process_text(transcript, chars_typed)
+                            last_partial = ""
+                        else:
+                            if transcript != last_partial:
+                                print(f"\r  … {transcript}   ", end="", flush=True)
+                                last_partial = transcript
+
+                    except TimeoutError:
+                        continue
+                    except Exception as e:
+                        print(f"  [Deepgram ошибка: {e}]")
+                        break
+        except Exception as e:
+            print(f"  [Ошибка записи: {e}]")
+        finally:
+            send_active = False
+            try:
+                ws.close()
+            except Exception:
+                pass
+            print("\n<<< ОСТАНОВЛЕНО\n")
 
     def toggle(self):
         if not self.recording:
