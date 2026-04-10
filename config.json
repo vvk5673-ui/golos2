@@ -1,5 +1,4 @@
 {
     "hotkey": "alt+x",
-    "engine": "deepgram",
-    "deepgram_seconds": 4510.082762956619
+    "engine": "deepgram"
 }

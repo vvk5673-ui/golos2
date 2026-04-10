@@ -64,6 +64,7 @@ logging.basicConfig(
 log = logging.getLogger("golos2")
 
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
+USAGE_FILE  = os.path.join(APP_DIR, "deepgram_usage.json")
 MODEL_PATH  = os.path.join(APP_DIR, "model")
 SAMPLE_RATE = 16000
 BLOCK_SIZE  = 2000           # было 4000 — меньше = точнее границы слов
@@ -96,6 +97,23 @@ def save_config(config: dict):
     """Сохраняет настройки в config.json."""
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=4)
+
+
+def load_usage() -> dict:
+    """Загружает статистику использования Deepgram из deepgram_usage.json."""
+    if not os.path.exists(USAGE_FILE):
+        return {"deepgram_seconds": 0}
+    try:
+        with open(USAGE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"deepgram_seconds": 0}
+
+
+def save_usage(usage: dict):
+    """Сохраняет статистику использования Deepgram в deepgram_usage.json."""
+    with open(USAGE_FILE, "w", encoding="utf-8") as f:
+        json.dump(usage, f, ensure_ascii=False, indent=4)
 
 
 def is_autostart_enabled() -> bool:
@@ -443,7 +461,8 @@ class VoiceInput:
         self.config = load_config()
         self.hotkey = self.config.get("hotkey", DEFAULT_HOTKEY)
         self.engine = self.config.get("engine", "vosk")  # "vosk" или "deepgram"
-        self.deepgram_seconds = self.config.get("deepgram_seconds", 0)  # общее время Deepgram
+        self.usage = load_usage()
+        self.deepgram_seconds = self.usage.get("deepgram_seconds", 0)  # общее время Deepgram
 
         # загружаем Vosk-модель (нужна всегда как запасной вариант)
         log.info("Загрузка модели Vosk...")
@@ -791,9 +810,9 @@ class VoiceInput:
                 pass
             duration = time.time() - session_start
             self.deepgram_seconds += duration
-            # сохраняем общее время в конфиг
-            self.config["deepgram_seconds"] = self.deepgram_seconds
-            save_config(self.config)
+            # сохраняем общее время в отдельный файл статистики
+            self.usage["deepgram_seconds"] = self.deepgram_seconds
+            save_usage(self.usage)
             # обновляем меню трея
             self.tray.menu = self._build_menu()
             self.tray.update_menu()

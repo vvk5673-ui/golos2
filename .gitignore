@@ -8,3 +8,4 @@ __pycache__/
 *.pyc
 .env
 *.log
+deepgram_usage.json
