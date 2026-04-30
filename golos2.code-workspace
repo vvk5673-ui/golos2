@@ -1,0 +1,15 @@
+{
+  "folders": [
+    {
+      "name": "Golos 2.0",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/.git": true,
+      "**/__pycache__": true,
+      "**/*.pyc": true
+    }
+  }
+}

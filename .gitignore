@@ -9,3 +9,4 @@ __pycache__/
 .env
 *.log
 deepgram_usage.json
+_claude_memory/
