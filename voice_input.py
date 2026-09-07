@@ -520,7 +520,8 @@ class VoiceInput:
             )
             with urllib.request.urlopen(req, timeout=3) as resp:
                 balances = json.load(resp).get("balances", [])
-            return sum(b["amount"] for b in balances if b.get("units") == "USD")
+            log.info(f"Баланс Deepgram, сырой ответ: {balances}")
+            return sum(b.get("amount") or 0 for b in balances)
         except Exception as e:
             log.warning(f"Не удалось получить баланс Deepgram: {e}")
             return None
