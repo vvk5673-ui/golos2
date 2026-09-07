@@ -41,6 +41,7 @@ import keyboard, pyperclip
 from PIL import Image, ImageDraw
 import pystray
 import urllib.parse
+import urllib.request
 import websockets.sync.client as ws_client
 from dotenv import load_dotenv
 
@@ -77,6 +78,10 @@ STARTUP_BAT = os.path.join(STARTUP_DIR, "golos2.bat")
 # загружаем .env файл с API-ключами
 load_dotenv(os.path.join(APP_DIR, ".env"))
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
+# отдельный ключ с ролью Admin (нужна для чтения баланса) — необязателен,
+# основной ключ выше для этого не подходит: у роли Default нет доступа к балансу
+DEEPGRAM_ADMIN_KEY = os.environ.get("DEEPGRAM_ADMIN_KEY", "")
+BALANCE_CACHE_SECONDS = 60  # не спрашивать баланс у Deepgram чаще раза в минуту
 # ──────────────────────────────────────────────────────────
 
 
@@ -463,6 +468,8 @@ class VoiceInput:
         self.engine = self.config.get("engine", "vosk")  # "vosk" или "deepgram"
         self.usage = load_usage()
         self.deepgram_seconds = self.usage.get("deepgram_seconds", 0)  # общее время Deepgram
+        self._balance_cache = None       # последний полученный от Deepgram баланс
+        self._balance_cache_time = 0.0   # когда его получили (time.time())
 
         # загружаем Vosk-модель (нужна всегда как запасной вариант)
         log.info("Загрузка модели Vosk...")
@@ -494,13 +501,50 @@ class VoiceInput:
         time.sleep(0.5)
         self.toggle()
 
+    def _fetch_deepgram_balance(self):
+        """Запрашивает реальный баланс аккаунта у Deepgram. None при любой ошибке
+        (нет ключа, нет интернета, ключ без прав на чтение баланса и т.п.)."""
+        if not DEEPGRAM_ADMIN_KEY:
+            return None
+        headers = {"Authorization": f"Token {DEEPGRAM_ADMIN_KEY}"}
+        try:
+            req = urllib.request.Request("https://api.deepgram.com/v1/projects", headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                projects = json.load(resp).get("projects", [])
+            if not projects:
+                return None
+            project_id = projects[0]["project_id"]
+
+            req = urllib.request.Request(
+                f"https://api.deepgram.com/v1/projects/{project_id}/balances", headers=headers
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                balances = json.load(resp).get("balances", [])
+            return sum(b["amount"] for b in balances if b.get("units") == "USD")
+        except Exception as e:
+            log.warning(f"Не удалось получить баланс Deepgram: {e}")
+            return None
+
     def _format_credit(self):
-        """Форматирует строку расхода кредита."""
-        cost = self.deepgram_seconds / 60 * 0.0077
-        remaining = 200.0 - cost
+        """Форматирует строку расхода кредита. Если есть ключ с правами на чтение
+        баланса (DEEPGRAM_ADMIN_KEY) — показывает реальный баланс аккаунта Deepgram
+        (обновляется не чаще раза в минуту). Иначе — оценку по времени записи."""
         mins = int(self.deepgram_seconds // 60)
         secs = int(self.deepgram_seconds % 60)
-        return f"Кредит: ${remaining:.2f} из $200  ({mins}м {secs}с)"
+
+        now = time.time()
+        if now - self._balance_cache_time > BALANCE_CACHE_SECONDS:
+            balance = self._fetch_deepgram_balance()
+            if balance is not None:
+                self._balance_cache = balance
+            self._balance_cache_time = now
+
+        if self._balance_cache is not None:
+            return f"Кредит: ${self._balance_cache:.2f}  ({mins}м {secs}с записи)"
+
+        cost = self.deepgram_seconds / 60 * 0.0077
+        remaining = 200.0 - cost
+        return f"Кредит: ~${remaining:.2f} из $200  (оценка, {mins}м {secs}с)"
 
     def _build_menu(self):
         """Собирает меню трея."""
